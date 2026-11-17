@@ -5,6 +5,8 @@
 #   freeradius  FreeRADIUS 3.2 - serwer AAA (tryb debug -X)       172.28.0.20
 #   daloradius  daloRADIUS 2.4 - panel WWW (Apache + PHP)         172.28.0.30
 #   client      "NAS"/klient testowy (radtest, eapol_test)        172.28.0.40
+#               + radsecproxy: RADIUS/UDP -> RadSec (TLS) do serwera
+#   pki         jednorazowo: CA + certyfikaty RadSec -> wolumen radsec_pki
 #
 #  Start:   docker compose up -d --build
 #  Logi:    docker compose logs -f freeradius
@@ -19,6 +21,17 @@ x-db-env: &db-env
   DB_PASSWORD: ${DB_PASSWORD}
 
 services:
+
+  pki:
+    # Jednorazowy kontener: generuje laboratoryjne CA i certyfikaty dla RadSec
+    # (skrypt radsec/gen-certs.sh). Jeśli certyfikaty już są - nic nie robi.
+    platform: linux/amd64
+    image: aaa-lab/freeradius:3.2
+    entrypoint: ["sh", "/gen-certs.sh", "/pki"]
+    volumes:
+      - ./radsec/gen-certs.sh:/gen-certs.sh:ro
+      - radsec_pki:/pki
+    network_mode: none
 
   db:
     image: mariadb:11.8
@@ -53,13 +66,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      pki:
+        condition: service_completed_successfully
     environment:
       <<: *db-env
       RADIUS_SECRET: ${RADIUS_SECRET}
       TZ: ${TZ}
+    volumes:
+      - radsec_pki:/etc/freeradius/certs/radsec:ro
     ports:
       - "1812:1812/udp"   # Authentication
       - "1813:1813/udp"   # Accounting
+      - "2083:2083/tcp"   # RadSec (RADIUS over TLS)
     healthcheck:
       test: ["CMD-SHELL", "echo 'FreeRADIUS-Statistics-Type = 1' | radclient -q -r 1 -t 3 127.0.0.1:18121 status adminsecret >/dev/null"]
       interval: 10s
@@ -106,13 +124,19 @@ services:
     platform: linux/amd64
     # Ten sam obraz co serwer, ale bez demona RADIUS: osobna maszyna "NAS"
     # w sieci 172.28.0.0/24 do testów radtest / eapol_test / tcpdump.
+    # Działa na nim radsecproxy: przyjmuje RADIUS/UDP na 127.0.0.1:1812/1813
+    # i przekazuje go do FreeRADIUS przez RadSec (TLS, freeradius:2083).
     image: aaa-lab/freeradius:3.2
     depends_on:
       freeradius:
         condition: service_healthy
-    entrypoint: ["sleep", "infinity"]
+    entrypoint: ["radsecproxy", "-f", "-c", "/etc/radsecproxy.conf"]
     environment:
       RADIUS_SECRET: ${RADIUS_SECRET}
+    volumes:
+      - ./radsec/radsecproxy.conf:/etc/radsecproxy.conf:ro
+      - ./radsec:/radsec:ro   # radsec_client.py, wireshark-demo.sh
+      - radsec_pki:/etc/radsecproxy/pki:ro
     networks:
       aaa_net:
         ipv4_address: 172.28.0.40
@@ -126,3 +150,4 @@ networks:
 volumes:
   db_data:
   dalo_data:
+  radsec_pki:

@@ -1,0 +1,81 @@
+# -*- text -*-
+# ============================================================================
+#  RadSec = RADIUS over TLS (RFC 6614), TCP/2083
+#
+#  Zamiast UDP/1812 + MD5 ze wspólnego sekretu cały pakiet RADIUS idzie
+#  w tunelu TLS (1.2 / 1.3) z WZAJEMNYM uwierzytelnieniem certyfikatami:
+#    - klient (NAS / radsecproxy) sprawdza certyfikat serwera,
+#    - serwer wymaga certyfikatu klienta wystawionego przez Lab RadSec CA.
+#
+#  Żądania trafiają do zwykłego serwera wirtualnego "default", więc
+#  użytkownicy z daloRADIUS (SQL) działają bez żadnych zmian.
+#
+#  Certyfikaty: wolumen radsec_pki -> /etc/freeradius/certs/radsec
+#  (generuje je usługa "pki", skrypt radsec/gen-certs.sh)
+# ============================================================================
+
+listen {
+	ipaddr = *
+	port = 2083
+
+	# auth + accounting na jednym połączeniu TLS
+	type = auth+acct
+	proto = tcp
+
+	virtual_server = default
+
+	# Tylko klienci z sekcji "clients radsec" poniżej (nie clients.conf / SQL)
+	clients = radsec
+
+	limit {
+		max_connections = 16
+		lifetime = 0
+		idle_timeout = 30
+	}
+
+	tls {
+		private_key_file = ${certdir}/radsec/server.key
+		certificate_file = ${certdir}/radsec/server.pem
+
+		# Zaufane CA: tylko nasze laboratoryjne
+		ca_file = ${certdir}/radsec/ca.pem
+
+		fragment_size = 8192
+
+		# Nowoczesny TLS: minimum 1.2, preferowany 1.3
+		tls_min_version = "1.2"
+		tls_max_version = "1.3"
+		cipher_list = "ECDHE+AESGCM:ECDHE+CHACHA20"
+		cipher_server_preference = yes
+		ecdh_curve = "prime256v1"
+
+		cache {
+			enable = no
+		}
+
+		# Kluczowe dla RadSec: bez poprawnego certyfikatu klienta
+		# handshake TLS kończy się błędem, zanim padnie choć jeden pakiet RADIUS
+		require_client_cert = yes
+	}
+}
+
+clients radsec {
+	# NAS z radsecproxy (kontener "client")
+	client nas_client_tls {
+		ipaddr = 172.28.0.40
+		proto = tls
+		# RFC 6614: w RadSec sekret jest stały i jawny ("radsec");
+		# bezpieczeństwo zapewnia TLS, a nie MD5 z sekretu
+		secret = radsec
+		shortname = nas-client-radsec
+		nas_type = other
+	}
+
+	# Testy z hosta (Docker Desktop / port 2083 wystawiony na zewnątrz)
+	client docker_host_tls {
+		ipaddr = 172.16.0.0/12
+		proto = tls
+		secret = radsec
+		shortname = docker-host-radsec
+	}
+}
