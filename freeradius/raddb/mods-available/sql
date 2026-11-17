@@ -1,0 +1,52 @@
+sql {
+	dialect = "mysql"
+	driver = "rlm_sql_${dialect}"
+
+	mysql {
+		# Bez TLS do bazy - ruch zostaje w wewnętrznej sieci Dockera
+		warnings = auto
+	}
+
+	server    = "$ENV{DB_HOST}"
+	port      = 3306
+	login     = "$ENV{DB_USER}"
+	password  = "$ENV{DB_PASSWORD}"
+	radius_db = "$ENV{DB_NAME}"
+
+	# Tabele (standardowy schemat FreeRADIUS, rozszerzony przez daloRADIUS)
+	acct_table1      = "radacct"
+	acct_table2      = "radacct"
+	postauth_table   = "radpostauth"
+	authcheck_table  = "radcheck"
+	groupcheck_table = "radgroupcheck"
+	authreply_table  = "radreply"
+	groupreply_table = "radgroupreply"
+	usergroup_table  = "radusergroup"
+
+	# Zamknij "wiszące" sesje, gdy NAS wyśle Accounting-On/Off
+	delete_stale_sessions = yes
+
+	# Pula połączeń do bazy
+	pool {
+		start = 2
+		min = 2
+		max = 10
+		spare = 3
+		uses = 0
+		retry_delay = 30
+		lifetime = 0
+		idle_timeout = 60
+		max_retries = 5
+	}
+
+	# Klienci RADIUS (NAS) dodani w daloRADIUS trafiają do tabeli "nas".
+	# FreeRADIUS wczytuje ją przy starcie -> po dodaniu NAS w panelu
+	# trzeba zrestartować kontener: docker compose restart freeradius
+	read_clients = yes
+	client_table = "nas"
+
+	group_attribute = "SQL-Group"
+
+	# Gotowe zapytania SQL dostarczone z FreeRADIUS
+	$INCLUDE ${modconfdir}/${.:name}/main/${dialect}/queries.conf
+}

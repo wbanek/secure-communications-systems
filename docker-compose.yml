@@ -1,0 +1,128 @@
+# ============================================================================
+#  AAA with RADIUS - środowisko laboratoryjne (Meeting #1, PoC)
+#
+#   db          MariaDB 11.8   - baza FreeRADIUS + daloRADIUS     172.28.0.10
+#   freeradius  FreeRADIUS 3.2 - serwer AAA (tryb debug -X)       172.28.0.20
+#   daloradius  daloRADIUS 2.4 - panel WWW (Apache + PHP)         172.28.0.30
+#   client      "NAS"/klient testowy (radtest, eapol_test)        172.28.0.40
+#
+#  Start:   docker compose up -d --build
+#  Logi:    docker compose logs -f freeradius
+#  Panel:   http://localhost:8000   (administrator / radius)
+# ============================================================================
+name: aaa-radius
+
+x-db-env: &db-env
+  DB_HOST: db
+  DB_NAME: ${DB_NAME}
+  DB_USER: ${DB_USER}
+  DB_PASSWORD: ${DB_PASSWORD}
+
+services:
+
+  db:
+    image: mariadb:11.8
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      # *.sql ładowane alfabetycznie przy pierwszym starcie (pusty wolumen)
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      aaa_net:
+        ipv4_address: 172.28.0.10
+
+  freeradius:
+    # Oficjalny obraz FreeRADIUS jest tylko amd64; na Macu z Apple Silicon
+    # działa w emulacji (wystarczająco szybko na laboratorium).
+    platform: linux/amd64
+    build: ./freeradius
+    image: aaa-lab/freeradius:3.2
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *db-env
+      RADIUS_SECRET: ${RADIUS_SECRET}
+      TZ: ${TZ}
+    ports:
+      - "1812:1812/udp"   # Authentication
+      - "1813:1813/udp"   # Accounting
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'FreeRADIUS-Statistics-Type = 1' | radclient -q -r 1 -t 3 127.0.0.1:18121 status adminsecret >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      aaa_net:
+        ipv4_address: 172.28.0.20
+
+  daloradius:
+    # Oficjalny Dockerfile daloRADIUS, budowany wprost z repozytorium (tag 2.4).
+    # Wersja musi zgadzać się ze schematem w db/init/02-*.sql i 03-*.sql.
+    build:
+      context: https://github.com/lirantal/daloradius.git#2.4
+    image: aaa-lab/daloradius:2.4
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      freeradius:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: db
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      # Używane przez "Test Connectivity" w panelu
+      DEFAULT_FREERADIUS_SERVER: freeradius
+      DEFAULT_FREERADIUS_PORT: 1812
+      DEFAULT_CLIENT_SECRET: ${RADIUS_SECRET}
+      TZ: ${TZ}
+    volumes:
+      - dalo_data:/data
+    ports:
+      - "8000:8000"   # panel operatora (administracja)
+      - "8080:80"     # portal użytkownika końcowego
+    networks:
+      aaa_net:
+        ipv4_address: 172.28.0.30
+
+  client:
+    platform: linux/amd64
+    # Ten sam obraz co serwer, ale bez demona RADIUS: osobna maszyna "NAS"
+    # w sieci 172.28.0.0/24 do testów radtest / eapol_test / tcpdump.
+    image: aaa-lab/freeradius:3.2
+    depends_on:
+      freeradius:
+        condition: service_healthy
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      RADIUS_SECRET: ${RADIUS_SECRET}
+    networks:
+      aaa_net:
+        ipv4_address: 172.28.0.40
+
+networks:
+  aaa_net:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  db_data:
+  dalo_data:
