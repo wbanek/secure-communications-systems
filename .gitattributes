@@ -1,0 +1,5 @@
+# Skrypty i konfiguracja montowane do kontenerów Linux: zawsze LF (ważne na Windows)
+*.sh   text eol=lf
+*.conf text eol=lf
+freeradius/raddb/** text eol=lf
+radsec/** text eol=lf
