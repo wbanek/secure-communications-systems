@@ -136,6 +136,7 @@ services:
     volumes:
       - ./radsec/radsecproxy.conf:/etc/radsecproxy.conf:ro
       - ./radsec:/radsec:ro   # radsec_client.py, wireshark-demo.sh
+      - ./eap:/eap:ro         # konfiguracje eapol_test + eap-demo.sh
       - radsec_pki:/etc/radsecproxy/pki:ro
     networks:
       aaa_net:

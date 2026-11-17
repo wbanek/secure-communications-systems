@@ -1,0 +1,104 @@
+# -*- text -*-
+# ============================================================================
+#  EAP - metody uwierzytelniania 802.1X (Wi-Fi WPA2/WPA3-Enterprise, LAN)
+#
+#    EAP-TLS         certyfikat użytkownika, bez hasła          TLS 1.3 (RFC 9190)
+#    PEAP-MSCHAPv2   hasło z daloRADIUS w tunelu TLS            TLS 1.2
+#    EAP-TTLS/PAP    hasło z daloRADIUS w tunelu TLS            TLS 1.2
+#
+#  Hasła dla PEAP/TTLS sprawdza serwer "inner-tunnel" (moduł sql -> radcheck),
+#  czyli ci sami użytkownicy, których dodajesz w panelu.
+#
+#  Certyfikaty z naszego Lab CA (wolumen radsec_pki, skrypt radsec/gen-certs.sh):
+#  serwer EAP używa tego samego certyfikatu co RadSec (CN=freeradius).
+# ============================================================================
+
+eap {
+	default_eap_type = peap
+	timer_expire = 60
+	ignore_unknown_eap_types = no
+	cisco_accounting_username_bug = no
+	max_sessions = ${max_requests}
+
+	# --- TLS dla tuneli PEAP / TTLS ------------------------------------------
+	# TLS 1.3 w PEAP/TTLS FreeRADIUS 3.2 oznacza jako eksperymentalne,
+	# więc tunele z hasłem zostają na TLS 1.2.
+	tls-config tls-tunnel {
+		private_key_file = ${certdir}/radsec/server.key
+		certificate_file = ${certdir}/radsec/server.pem
+		ca_file = ${certdir}/radsec/ca.pem
+
+		cipher_list = "ECDHE+AESGCM:ECDHE+CHACHA20"
+		cipher_server_preference = yes
+		tls_min_version = "1.2"
+		tls_max_version = "1.2"
+		ecdh_curve = "prime256v1"
+
+		cache {
+			enable = no
+		}
+		verify {
+		}
+		ocsp {
+			enable = no
+		}
+	}
+
+	# --- TLS dla EAP-TLS (certyfikat klienta) --------------------------------
+	tls-config tls-cert {
+		private_key_file = ${certdir}/radsec/server.key
+		certificate_file = ${certdir}/radsec/server.pem
+		ca_file = ${certdir}/radsec/ca.pem
+
+		cipher_list = "ECDHE+AESGCM:ECDHE+CHACHA20"
+		cipher_server_preference = yes
+		# EAP-TLS 1.3 (RFC 9190): pełny handshake w 1 RTT mniej,
+		# certyfikat klienta szyfrowany (nie widać tożsamości w eterze)
+		tls_min_version = "1.2"
+		tls_max_version = "1.3"
+		ecdh_curve = "prime256v1"
+
+		# Tożsamość EAP (User-Name) musi być równa CN certyfikatu:
+		# "jan" nie zaloguje się certyfikatem wystawionym dla kogoś innego
+		check_cert_cn = %{User-Name}
+
+		cache {
+			enable = no
+		}
+		verify {
+		}
+		ocsp {
+			enable = no
+		}
+	}
+
+	tls {
+		tls = tls-cert
+	}
+
+	ttls {
+		tls = tls-tunnel
+		default_eap_type = md5
+		copy_request_to_tunnel = no
+		use_tunneled_reply = no
+		virtual_server = "inner-tunnel"
+	}
+
+	peap {
+		tls = tls-tunnel
+		default_eap_type = mschapv2
+		copy_request_to_tunnel = no
+		use_tunneled_reply = no
+		virtual_server = "inner-tunnel"
+	}
+
+	mschapv2 {
+	}
+
+	md5 {
+	}
+
+	gtc {
+		auth_type = PAP
+	}
+}

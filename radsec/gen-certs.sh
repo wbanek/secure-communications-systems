@@ -9,19 +9,17 @@
 #    server.pem / server.key    certyfikat serwera FreeRADIUS  (serverAuth)
 #    client.pem / client.key    certyfikat NAS-a (radsecproxy) (clientAuth)
 #    rogue-ca.pem, rogue.pem/.key  certyfikat z OBCEGO CA -> test odrzucenia
+#    user-jan.pem / .key        certyfikat UŻYTKOWNIKA jan dla EAP-TLS (clientAuth)
+#    user-ewa.pem / .key        drugi użytkownik: test check_cert_cn (podszycie)
 #
-#  Klucze: ECDSA P-256. Ponowne wygenerowanie: docker compose down -v
+#  Klucze: ECDSA P-256. Brakujące pliki są dorabiane przy każdym starcie,
+#  istniejące zostają. Wszystko od nowa: docker compose down -v
 # ============================================================================
 set -eu
 
 OUT="${1:-/pki}"
 mkdir -p "$OUT"
 cd "$OUT"
-
-if [ -f ca.pem ] && [ -f server.pem ] && [ -f client.pem ]; then
-    echo "[pki] certyfikaty już istnieją w $OUT - pomijam"
-    exit 0
-fi
 
 DAYS_CA=3650
 DAYS_LEAF=825
@@ -57,18 +55,21 @@ EOF
     rm -f "$1.csr" "$1.ext"
 }
 
-echo "[pki] generuję Lab RadSec CA"
-make_ca ca "AAA Lab RadSec CA"
+# Tylko to, czego jeszcze nie ma
+need() { [ ! -f "$1.pem" ]; }
 
-echo "[pki] certyfikat serwera: CN=freeradius"
-make_leaf server "freeradius" "DNS:freeradius,IP:172.28.0.20" "serverAuth" ca
-
-echo "[pki] certyfikat klienta: CN=nas-client"
-make_leaf client "nas-client" "DNS:client,IP:172.28.0.40" "clientAuth" ca
-
-echo "[pki] certyfikat 'intruza' z obcego CA (do testu odrzucenia)"
-make_ca rogue-ca "Rogue CA"
-make_leaf rogue "rogue-nas" "DNS:rogue" "clientAuth" rogue-ca
+need ca       && { echo "[pki] generuję Lab RadSec CA"; make_ca ca "AAA Lab RadSec CA"; }
+need server   && { echo "[pki] certyfikat serwera: CN=freeradius";
+                   make_leaf server "freeradius" "DNS:freeradius,IP:172.28.0.20" "serverAuth" ca; }
+need client   && { echo "[pki] certyfikat NAS-a: CN=nas-client";
+                   make_leaf client "nas-client" "DNS:client,IP:172.28.0.40" "clientAuth" ca; }
+need rogue-ca && { echo "[pki] obce CA (intruz)"; make_ca rogue-ca "Rogue CA"; }
+need rogue    && { echo "[pki] certyfikat intruza: CN=rogue-nas";
+                   make_leaf rogue "rogue-nas" "DNS:rogue" "clientAuth" rogue-ca; }
+need user-jan && { echo "[pki] certyfikat użytkownika (EAP-TLS): CN=jan";
+                   make_leaf user-jan "jan" "email:jan@aaa.lab" "clientAuth" ca; }
+need user-ewa && { echo "[pki] certyfikat użytkownika (EAP-TLS): CN=ewa";
+                   make_leaf user-ewa "ewa" "email:ewa@aaa.lab" "clientAuth" ca; }
 
 # Uprawnienia: certyfikaty publiczne, klucze tylko dla root + grupy freerad
 chmod 0644 ./*.pem
@@ -79,6 +80,6 @@ fi
 rm -f ./*.srl
 
 echo "[pki] gotowe:"
-for c in ca server client rogue; do
+for c in ca server client rogue user-jan user-ewa; do
     openssl x509 -in "$c.pem" -noout -subject -issuer -enddate | sed "s/^/[pki]   $c: /"
 done

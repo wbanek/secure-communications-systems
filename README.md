@@ -1,7 +1,8 @@
 # AAA with RADIUS: środowisko Docker (Meeting #1, PoC)
 
 FreeRADIUS 3.2 + MariaDB + panel daloRADIUS 2.4 w Docker Compose,
-plus **RadSec (RADIUS over TLS, RFC 6614)** między „access pointem” a serwerem.
+plus **RadSec (RADIUS over TLS, RFC 6614)** między „access pointem” a serwerem
+i metody **EAP** (802.1X): EAP-TLS z TLS 1.3, PEAP-MSCHAPv2, EAP-TTLS/PAP.
 Baza startuje **bez użytkowników**: dodajemy ich z panelu w trakcie demo.
 
 | Kontener | Rola | Adres |
@@ -168,6 +169,52 @@ Teza: odczytać tunel może tylko ktoś, kto ma klucze sesji, czyli jedna ze str
 
 > `radsec/radsec_client.py` to minimalny klient RadSec (Python, bez zależności). Wysyła Access-Request przez TLS i zapisuje klucze sesji. Można go używać osobno: `docker compose exec client python3 /radsec/radsec_client.py jan jan123`.
 
+## Metody EAP (802.1X) (ok. 5 minut)
+
+EAP to sposób, w jaki laptop lub telefon loguje się do Wi-Fi WPA2/WPA3-Enterprise. Access point tylko przekazuje wiadomości EAP do serwera RADIUS (atrybut `EAP-Message`). W laboratorium klienta Wi-Fi udaje `eapol_test` na kontenerze `client`.
+
+| Metoda | Czym loguje się użytkownik | TLS | Konfiguracja |
+|---|---|---|---|
+| EAP-TLS | certyfikat `CN=jan` (bez hasła) | **1.3** (RFC 9190) | `eap/eap-tls.conf` |
+| PEAP-MSCHAPv2 | hasło z daloRADIUS w tunelu TLS | 1.2 | `eap/peap-mschapv2.conf` |
+| EAP-TTLS/PAP | hasło z daloRADIUS w tunelu TLS | 1.2 | `eap/ttls-pap.conf` |
+| EAP-TLS, podszycie | tożsamość `jan`, certyfikat `CN=ewa` | 1.3 | `eap/eap-tls-podszycie.conf` |
+
+Wszystkie metody działają zarówno po zwykłym UDP, jak i przez RadSec. Użytkownicy PEAP/TTLS pochodzą z panelu: serwer `inner-tunnel` sprawdza hasło w tabeli `radcheck`. TLS 1.3 w PEAP/TTLS FreeRADIUS 3.2 oznacza jako eksperymentalne, dlatego tunele z hasłem używają TLS 1.2.
+
+**1. Wszystkie metody naraz** (z nagraniem do Wiresharka):
+```bash
+docker compose exec client sh /eap/eap-demo.sh
+```
+```
+  METODA                 DROGA   TLS      WYNIK
+  peap-mschapv2          UDP     TLSv1.2  SUCCESS
+  peap-mschapv2          RadSec  TLSv1.2  SUCCESS
+  ttls-pap               UDP     TLSv1.2  SUCCESS
+  ttls-pap               RadSec  TLSv1.2  SUCCESS
+  eap-tls                UDP     TLSv1.3  SUCCESS
+  eap-tls                RadSec  TLSv1.3  SUCCESS
+  eap-tls-podszycie      UDP     TLSv1.3  FAILURE
+  eap-tls-podszycie      RadSec  TLSv1.3  FAILURE
+```
+
+**2. Pojedyncza metoda z pełnym logiem** (przez RadSec: `-a 127.0.0.1`, po UDP: `-a 172.28.0.20`):
+```bash
+docker compose exec client eapol_test -c /eap/peap-mschapv2.conf -a 127.0.0.1 -s testing123
+docker compose exec client eapol_test -c /eap/eap-tls.conf       -a 127.0.0.1 -s testing123
+```
+Ostatnia linia `SUCCESS`. Wyżej `SSL: Using TLS version TLSv1.3` (EAP-TLS) albo `TLSv1.2` (PEAP).
+
+W logu FreeRADIUS pokaż:
+- PEAP: na zewnątrz `User-Name = "anonymous"`, w tunelu `eap_peap: Setting User-Name to jan`, `Virtual server inner-tunnel received request`, `mschap: Found Cleartext-Password` (hasło z bazy daloRADIUS) i `eap_mschapv2: MSCHAP Success`,
+- EAP-TLS: `TLS-Client-Cert-Common-Name := "jan"`, `checking certificate CN (jan) with xlat'ed value (jan)`, `send TLS 1.3 Handshake`,
+- podszycie: `Certificate CN (ewa) does not match specified value (jan)!` i `Sent Access-Reject`. Certyfikat `ewa` jest ważny (nasze CA), ale nie należy do `jan`: pilnuje tego `check_cert_cn = %{User-Name}` w `mods-available/eap`.
+
+**3. EAP w Wiresharku:** `docker compose cp client:/tmp/eap-demo.pcap .`, filtr `eap`:
+- PEAP/TTLS po UDP: `Response, Identity` ma tylko `anonymous` (prawdziwy login jest w tunelu), certyfikat serwera `CN=freeradius` jest widoczny (TLS 1.2), a hasło nie,
+- EAP-TLS 1.3 po UDP: widać tożsamość `jan`, ale **certyfikat klienta jest zaszyfrowany**. W TLS 1.2 byłby widoczny razem z danymi osobowymi,
+- te same metody przez RadSec (filtr `tcp.port == 2083`): z EAP nie widać nic, nawet `anonymous`.
+
 ## Pliki
 
 | Ścieżka | Rola |
@@ -178,9 +225,12 @@ Teza: odczytać tunel może tylko ktoś, kto ma klucze sesji, czyli jedna ze str
 | `freeradius/raddb/mods-available/sql` | połączenie FreeRADIUS → MariaDB |
 | `freeradius/raddb/clients.conf` | kto może wysyłać zapytania (sieć Dockera) |
 | `freeradius/raddb/sites-available/tls` | RadSec: nasłuch TCP/2083, TLS 1.2–1.3, wymagany certyfikat klienta, lista klientów RadSec |
-| `radsec/gen-certs.sh` | generuje Lab RadSec CA (ECDSA P-256), certyfikat serwera, NAS-a i „intruza” z obcego CA |
+| `radsec/gen-certs.sh` | generuje Lab RadSec CA (ECDSA P-256), certyfikat serwera, NAS-a, „intruza” z obcego CA i użytkowników `jan`, `ewa` (EAP-TLS); brakujące dorabia przy każdym starcie |
 | `radsec/radsecproxy.conf` | NAS: przyjmuje UDP na 127.0.0.1:1812/1813, wysyła RadSec do `freeradius:2083` |
 | `radsec/radsec_client.py` | minimalny klient RadSec zapisujący klucze TLS (do odszyfrowania w Wiresharku) |
+| `freeradius/raddb/mods-available/eap` | moduł EAP: EAP-TLS (TLS 1.3, `check_cert_cn`), PEAP i TTLS (TLS 1.2), certyfikaty z Lab CA |
+| `eap/*.conf` | konfiguracje `eapol_test`: PEAP-MSCHAPv2, TTLS/PAP, EAP-TLS, podszycie |
+| `eap/eap-demo.sh` | wszystkie metody po UDP i przez RadSec + nagranie `eap-demo.pcap` |
 | `radsec/wireshark-demo.sh` | nagrywa `radsec-demo.pcap` + `radsec-keys.log`: UDP, RadSec, złe hasło, intruz |
 | `db/init/01–03-*.sql` | schemat bazy FreeRADIUS + daloRADIUS (z repozytorium daloRADIUS) |
 | `db/init/10-lab-seed.sql` | tylko wpis NAS dla kontenera `client` |
@@ -205,6 +255,8 @@ docker compose exec client openssl x509 -in /etc/radsecproxy/pki/client.pem -noo
 | W panelu są stare użytkownicy (alice, bob) | Baza z poprzedniej wersji: `docker compose down -v && docker compose up -d`. |
 | Ostrzeżenie `platform (linux/amd64) does not match` | Na Macu ARM to normalne, FreeRADIUS działa w emulacji. |
 | `Threading must be enabled for TLS sockets to function properly` | FreeRADIUS uruchomiony z `-X`. RadSec wymaga wątków: używamy `-fxx -l stdout` (ten sam poziom logów). |
+| `eapol_test` z PEAP/TTLS kończy się `FAILURE` | Użytkownik `jan` / `jan123` musi istnieć w panelu z typem `Cleartext-Password` (MSCHAPv2 potrzebuje hasła jawnego albo NT-Password). |
+| `eapol_test` z EAP-TLS: `FAILURE`, w logu `Certificate CN … does not match` | `identity` w konfiguracji musi być równe CN certyfikatu (`jan` ↔ `user-jan.pem`). |
 | `radtest … 127.0.0.1` daje `No reply from server` | radsecproxy nie zestawił TLS: `docker compose logs client`. Najczęściej brak certyfikatów (`docker compose logs pki`) albo serwer jeszcze nie wstał. |
 | `pki` kończy się błędem `sh: …\r: not found` | Windows zamienił końce linii na CRLF. Repo ma `.gitattributes` (LF), więc sklonuj je ponownie albo `git add --renormalize .`. |
 | W logu serwera `Certificate chain - 1 intermediate CA cert(s) untrusted` | Informacja, nie błąd: radsecproxy dosyła CA w łańcuchu. Weryfikacja i tak idzie względem `ca.pem`. |

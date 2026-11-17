@@ -16,7 +16,7 @@ RUN apt-get update \
         radsecproxy tcpdump python3 \
  && rm -rf /var/lib/apt/lists/*
 
-# Nasze nadpisania konfiguracji (moduł SQL, klienci)
+# Nasze nadpisania konfiguracji (moduł SQL, moduł EAP, klienci, RadSec)
 COPY raddb/ /etc/freeradius/
 
 # Włączenie modułów / serwerów wirtualnych:
